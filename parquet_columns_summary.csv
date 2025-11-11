@@ -1,0 +1,9 @@
+column,dtype,non_null,null
+year,int32,283638,0
+region_code,object,283638,0
+region_level,int64,283638,0
+sex_code,object,283638,0
+sex_level,int64,283638,0
+age_code,object,283638,0
+age_level,int32,283638,0
+emp,float64,283638,0

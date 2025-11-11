@@ -1,0 +1,64 @@
+body { background-color: rgb(217,217,217); }
+
+/* Glassy header */
+.glass {
+  background: rgba(255,255,255,0.78);
+  border: 1px solid #e6e9ef;
+  backdrop-filter: saturate(160%) blur(10px);
+  -webkit-backdrop-filter: saturate(160%) blur(10px);
+  box-shadow: 0 8px 30px rgba(0,0,0,.08);
+  border-radius: 16px;
+}
+
+/* Keep the header compact */
+.header-bar {
+  padding: 8px 12px;
+}
+
+/* Right-aligned nav pills */
+.nav-pill {
+  padding: 6px 12px;
+  height: 34px;
+  border-radius: 999px;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 14px;
+  color: #003662;
+  background: #ffffff;
+  border: 1px solid #e6e9ef;
+  transition: all .16s ease;
+  display: inline-flex; align-items: center; gap: 8px;
+  white-space: nowrap;
+  box-shadow: 0 1px 0 rgba(0,0,0,.02);
+}
+.nav-pill:hover { transform: translateY(-1px); box-shadow: 0 6px 14px rgba(0,0,0,.06); }
+.nav-pill:focus { outline: 0; box-shadow: 0 0 0 3px rgba(0,54,98,.18); }
+.nav-pill.active { background: #e7eff6; border-color: #cbd8e6; }
+
+
+/* Icon size */
+.nav-pill .i { font-size: 14px; line-height: 1; }
+
+/* Filter card controls */
+.card-lite{
+  border-radius: 16px;
+  background: #fff;
+  border: 1px solid #e6e9ef;
+  box-shadow: 0 2px 12px rgba(0,0,0,.06);
+}
+
+/* Tighten labels */
+.label-muted {
+  color: #6c757d;
+  font-size: 12px;
+}
+
+/* Map frame */
+.map-frame {
+  height: 70vh;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid #e6e9ef;
+  background: #fff;
+  box-shadow: 0 4px 20px rgba(0,0,0,.10);
+}

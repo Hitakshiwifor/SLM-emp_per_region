@@ -1,0 +1,9 @@
+/* Hover and active state for Help and Next buttons */
+#open-help-cards:hover,
+#open-help-cards:active,
+button[id^="{'type':'next-button'"]:hover,
+button[id^="{'type':'next-button'"]:active {
+  background-color: #003662 !important;
+  color: white !important;
+  border-color: #003662 !important;
+}
