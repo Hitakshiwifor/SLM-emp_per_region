@@ -1,4 +1,3 @@
-# pages/tables.py
 from functools import lru_cache
 from pathlib import Path
 import os
@@ -8,7 +7,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import dash_bootstrap_components as dbc
-from dash import html, dcc, Input, Output, State
+from dash import html, dcc, Input, Output, State, callback_context
 
 # -------- project config / loader ----------
 from ..config import DATA_DIR
@@ -84,6 +83,26 @@ DEFAULT_METRIC_KEY = METRIC_OPTIONS[0]["value"]
 CURRENT_YEAR = 2025  # "Metric today"
 TARGET_YEAR  = 2040  # "Metric in 2040"
 
+# All available years in the dataset (for potential future extensions)
+YEAR_VALUES = (
+    sorted(df[YEAR_COL].dropna().astype(int).unique().tolist())
+    if not df.empty else []
+)
+
+def _default_years():
+    """Pick sensible defaults, e.g. ~10 years apart ending near CURRENT_YEAR."""
+    if not YEAR_VALUES:
+        return CURRENT_YEAR - 10, CURRENT_YEAR
+    max_year = YEAR_VALUES[-1]
+    year2 = CURRENT_YEAR if CURRENT_YEAR in YEAR_VALUES else max_year
+    target_min = year2 - 10
+    eligible = [y for y in YEAR_VALUES if (y < year2 and y >= target_min)]
+    year1 = eligible[-1] if eligible else YEAR_VALUES[0]
+    return year1, year2
+
+DEFAULT_YEAR1, DEFAULT_YEAR2 = _default_years()
+YEAR_OPTIONS = [{"label": str(y), "value": y} for y in YEAR_VALUES]
+
 # ========= 3. SHAPES DIMENSION: region_code -> NAME_LATN =====================
 
 @lru_cache(maxsize=1)
@@ -130,7 +149,7 @@ def _location_options():
     ]
     return sorted(opts, key=lambda x: x["label"])
 
-# ========= 4. DATA PREP FOR TABLE ===========================================
+# ========= 4. COMMON DATA HELPERS ===========================================
 
 def _ensure_levels(sub: pd.DataFrame) -> pd.DataFrame:
     """
@@ -151,6 +170,7 @@ def _year_clip(sub: pd.DataFrame) -> pd.DataFrame:
     sub[YEAR_COL] = sub[YEAR_COL].astype(int)
     return sub[(sub[YEAR_COL] >= 2000) & (sub[YEAR_COL] <= 2040)]
 
+# ========= 5. TABLE DATA (TIME SERIES) ======================================
 
 @lru_cache(maxsize=32)
 def _rows_for_table(metric_key: str) -> pd.DataFrame:
@@ -224,11 +244,11 @@ def _rows_for_table(metric_key: str) -> pd.DataFrame:
     name_map = _regioncode_to_name()
     out["region_name"] = out["code"].map(lambda c: name_map.get(c, c))
 
-    # keep all regions; sort by Metric today
+    # keep all regions; default sort by Metric today
     out = out.sort_values("current", ascending=False)
     return out.reset_index(drop=True)
 
-# ========= 5. DATA PREP FOR RISK MATRIX =====================================
+# ========= 6. RISK MATRIX DATA ==============================================
 
 @lru_cache(maxsize=8)
 def _risk_data_for_year(year: int) -> pd.DataFrame:
@@ -289,7 +309,8 @@ def _risk_matrix_figure(selected_locations):
                     font=dict(size=12),
                 )
             ],
-            margin=dict(l=10, r=10, t=10, b=10),
+            margin=dict(l=0, r=0, t=0, b=0),
+            height=240,
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
         )
@@ -315,7 +336,8 @@ def _risk_matrix_figure(selected_locations):
                     font=dict(size=12),
                 )
             ],
-            margin=dict(l=10, r=10, t=10, b=10),
+            margin=dict(l=0, r=0, t=0, b=0),
+            height=240,
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
         )
@@ -354,7 +376,7 @@ def _risk_matrix_figure(selected_locations):
         line=dict(color="rgba(0,0,0,0.3)", width=1, dash="dash"),
     )
 
-    # Quadrant labels (simple annotations)
+    # Quadrant labels
     xs = data["supply"]
     ys = data["une"]
     x_min, x_max = float(xs.min()), float(xs.max())
@@ -390,7 +412,8 @@ def _risk_matrix_figure(selected_locations):
     )
 
     fig.update_layout(
-        margin=dict(l=10, r=10, t=30, b=40),
+        margin=dict(l=0, r=0, t=0, b=0),
+        height=240,  # compact height
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         xaxis=dict(
@@ -398,19 +421,21 @@ def _risk_matrix_figure(selected_locations):
             zeroline=False,
             showgrid=True,
             gridcolor="rgba(0,0,0,0.05)",
+            title_standoff=4,
         ),
         yaxis=dict(
             title=f"Unemployed ({CURRENT_YEAR})",
             zeroline=False,
             showgrid=True,
             gridcolor="rgba(0,0,0,0.05)",
+            title_standoff=4,
         ),
         showlegend=False,
     )
 
     return fig
 
-# ========= 6. SPARKLINE FIGURE ==============================================
+# ========= 7. SMALL SPARKLINE FOR TABLE =====================================
 
 def _sparkline(x, y):
     """
@@ -440,113 +465,30 @@ def _sparkline(x, y):
     )
     return fig
 
-# ========= 7. UI COMPONENTS ==================================================
+# ========= 8. UI COMPONENTS ==================================================
 
 def _risk_card():
-    """Left-hand card: risk matrix scatter + info icon."""
+    """Left-hand card: risk matrix scatter (no info icon, no popover)."""
     return dbc.Card(
         dbc.CardBody(
             [
-                dbc.Row(
-                    [
-                        dbc.Col(
-                            html.H5(
-                                "Risk matrix: supply vs unemployment",
-                                className="mb-0",
-                                style={"color": "#003662"},
-                            ),
-                            width="auto",
-                        ),
-                        dbc.Col(
-                            dbc.Button(
-                                html.I(className="bi bi-info-circle"),
-                                id="tbl-help-btn",
-                                outline=True,
-                                color="secondary",
-                                size="sm",
-                                className="ms-2",
-                                style={"borderRadius": "999px"},
-                            ),
-                            width="auto",
-                        ),
-                    ],
-                    className="g-1 align-items-center mb-2",
-                    justify="between",
+                html.H5(
+                    "Risk matrix: supply vs unemployment",
+                    className="mb-2",
+                    style={"color": "#003662"},
                 ),
                 dcc.Graph(
                     id="tbl-risk-scatter",
                     config={"displayModeBar": False},
-                    style={"height": "340px"},
+                    style={"width": "100%"},  # no fixed height, uses fig height
                 ),
-                # Popover with explanation for the whole page
-                dbc.Popover(
-                    [
-                        dbc.PopoverHeader("How to use this page"),
-                        dbc.PopoverBody(
-                            [
-                                html.P(
-                                    "This view combines a risk matrix and a time series table "
-                                    "to help you prioritise regions.",
-                                    className="mb-2",
-                                ),
-                                html.H6("Risk matrix", className="mt-1"),
-                                html.Ul(
-                                    [
-                                        html.Li(
-                                            f"Each point is a region in {CURRENT_YEAR}, with "
-                                            "supply on the x-axis and unemployed on the y-axis."
-                                        ),
-                                        html.Li(
-                                            "The quadrant lines (medians) split regions into "
-                                            "higher / lower supply and higher / lower unemployment."
-                                        ),
-                                        html.Li(
-                                            "Top-right: large labour pool but also high unemployment "
-                                            "(latent talent). Bottom-right: large pool and low unemployment "
-                                            "(highly utilised)."
-                                        ),
-                                        html.Li(
-                                            "Use the Location filter to focus on specific regions."
-                                        ),
-                                    ]
-                                ),
-                                html.H6("Time series table", className="mt-2"),
-                                html.Ul(
-                                    [
-                                        html.Li(
-                                            f"Metric today shows the selected metric in {CURRENT_YEAR} "
-                                            "(or nearest year)."
-                                        ),
-                                        html.Li(
-                                            f"Metric in {TARGET_YEAR} shows the same metric in {TARGET_YEAR} "
-                                            "(or nearest year)."
-                                        ),
-                                        html.Li(
-                                            "Metric over time is a sparkline from 2000–2040; "
-                                            "hover to see exact values and years."
-                                        ),
-                                        html.Li(
-                                            "By default you see the top 30 locations by Metric today. "
-                                            "Select locations in the filter to see others."
-                                        ),
-                                    ]
-                                ),
-                            ]
-                        ),
-                    ],
-                    id="tbl-help-popover",
-                    target="tbl-help-btn",
-                    is_open=False,
-                    placement="bottom",
-                    trigger="click",
-                ),
-            ]
+            ],
+            className="p-2",
         ),
         style={
             "borderRadius": "16px",
             "boxShadow": "0 4px 20px rgba(0,0,0,.10)",
             "backgroundColor": "#ffffff",
-            "minHeight": "100%",
         },
     )
 
@@ -600,27 +542,65 @@ def _filter_bar():
 
 
 def _table_card():
+    # Table header – visually same as before but with IDs for sorting
     header = html.Thead(
         html.Tr(
             [
-                html.Th("Location"),
-                html.Th("Metric today", style={"width": "180px", "textAlign": "right"}),
-                html.Th("Metric in 2040", style={"width": "160px", "textAlign": "right"}),
+                html.Th(
+                    id="tbl-sort-loc-th",
+                    children="Location",
+                    style={"cursor": "pointer"},  # keeps default black/bold, just pointer cursor
+                ),
+                html.Th(
+                    id="tbl-sort-current-th",
+                    children="Metric today",
+                    style={
+                        "width": "180px",
+                        "textAlign": "right",
+                        "cursor": "pointer",
+                    },
+                ),
+                html.Th(
+                    id="tbl-sort-2040-th",
+                    children="Metric in 2040",
+                    style={
+                        "width": "160px",
+                        "textAlign": "right",
+                        "cursor": "pointer",
+                    },
+                ),
                 html.Th("Metric over time"),
             ]
-        )
+        ),
+        # Sticky header so it stays while rows scroll
+        style={
+            "position": "sticky",
+            "top": 0,
+            "zIndex": 1,
+            "backgroundColor": "#ffffff",
+        },
     )
+
     body = html.Tbody(id="tbl-body")
+
+    table = dbc.Table(
+        [header, body],
+        bordered=False,
+        hover=True,
+        responsive=True,
+        className="align-middle mb-0",  # remove extra bottom margin
+    )
 
     return dbc.Card(
         dbc.CardBody(
-            dbc.Table(
-                [header, body],
-                bordered=False,
-                hover=True,
-                responsive=True,
-                className="align-middle",
-            )
+            # Scroll only inside this div
+            html.Div(
+                table,
+                style={
+                    "maxHeight": "450px",   # adjust height as needed
+                    "overflowY": "auto",
+                },
+            ),
         ),
         style={
             "borderRadius": "20px",
@@ -637,17 +617,32 @@ def layout():
             _filter_bar(),
             dbc.Row(
                 [
-                    dbc.Col(_risk_card(), lg=4, md=5, className="mb-3"),
-                    dbc.Col(_table_card(), lg=8, md=7, className="mb-3"),
+                    # LEFT: Risk matrix only
+                    dbc.Col(
+                        _risk_card(),
+                        lg=5,
+                        md=12,
+                        className="mb-3",
+                    ),
+                    # RIGHT: Time-series table
+                    dbc.Col(
+                        _table_card(),
+                        lg=7,
+                        md=12,
+                        className="mb-3",
+                    ),
                 ],
                 className="g-3",
             ),
             html.Div(style={"height": "12px"}),
+            # Stores for sorting state
+            dcc.Store(id="tbl-sort-column", data="current"),
+            dcc.Store(id="tbl-sort-direction", data="desc"),
         ],
         fluid=True,
     )
 
-# ========= 8. CALLBACKS ======================================================
+# ========= 9. CALLBACKS =====================================================
 
 def register_callbacks(app):
     # Populate Location dropdown (options + keep valid selection)
@@ -668,13 +663,73 @@ def register_callbacks(app):
         kept = [v for v in current_list if v in valid]
         return opts, (kept if kept else None)
 
-    # Build table rows when Metric / Location change
+    # Manage sort state when header buttons are clicked
+    @app.callback(
+        Output("tbl-sort-column", "data"),
+        Output("tbl-sort-direction", "data"),
+        Output("tbl-sort-loc-btn", "children"),
+        Output("tbl-sort-current-btn", "children"),
+        Output("tbl-sort-2040-btn", "children"),
+        Input("tbl-sort-loc-btn", "n_clicks"),
+        Input("tbl-sort-current-btn", "n_clicks"),
+        Input("tbl-sort-2040-btn", "n_clicks"),
+        State("tbl-sort-column", "data"),
+        State("tbl-sort-direction", "data"),
+        prevent_initial_call=False,
+    )
+    def _update_sort_state(n_loc, n_curr, n_2040, cur_col, cur_dir):
+        base_loc = "Location"
+        base_curr = "Metric today"
+        base_2040 = "Metric in 2040"
+
+        # Determine which header was clicked
+        ctx = callback_context
+        if not ctx.triggered:
+            # initial load: keep defaults, show arrow on current (descending)
+            arrow = " ↓" if (cur_dir or "desc") == "desc" else " ↑"
+            return (
+                cur_col or "current",
+                cur_dir or "desc",
+                base_loc,
+                base_curr + arrow,
+                base_2040,
+            )
+
+        triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
+
+        if triggered_id == "tbl-sort-loc-btn":
+            new_col = "region_name"
+        elif triggered_id == "tbl-sort-current-btn":
+            new_col = "current"
+        elif triggered_id == "tbl-sort-2040-btn":
+            new_col = "y2040"
+        else:
+            new_col = cur_col or "current"
+
+        # Toggle direction if same column; otherwise default to descending
+        if new_col == cur_col:
+            new_dir = "asc" if (cur_dir or "desc") == "desc" else "desc"
+        else:
+            new_dir = "desc"
+
+        # Build labels with arrow for active column
+        arrow = " ↑" if new_dir == "asc" else " ↓"
+
+        loc_label = base_loc + (arrow if new_col == "region_name" else "")
+        curr_label = base_curr + (arrow if new_col == "current" else "")
+        y2040_label = base_2040 + (arrow if new_col == "y2040" else "")
+
+        return new_col, new_dir, loc_label, curr_label, y2040_label
+
+    # Build table rows when Metric / Location or sort change
     @app.callback(
         Output("tbl-body", "children"),
         Input("tbl-metric-dd", "value"),
         Input("tbl-location-dd", "value"),
+        Input("tbl-sort-column", "data"),
+        Input("tbl-sort-direction", "data"),
     )
-    def _update_table(metric_key, selected_locations):
+    def _update_table(metric_key, selected_locations, sort_col, sort_dir):
         metric_key = metric_key or DEFAULT_METRIC_KEY
         rows_all = _rows_for_table(metric_key)
 
@@ -698,8 +753,13 @@ def register_callbacks(app):
             # No selection: show ONLY top 30 by "Metric today" (current)
             rows = rows_all.sort_values("current", ascending=False).head(30).copy()
 
-        # Sort by Metric today for a consistent table order
-        rows = rows.sort_values("current", ascending=False)
+        # Sorting
+        sort_col = sort_col or "current"
+        sort_dir = sort_dir or "desc"
+        ascending = sort_dir == "asc"
+
+        if sort_col in rows.columns:
+            rows = rows.sort_values(sort_col, ascending=ascending)
 
         body_rows = []
         for _, r in rows.iterrows():
@@ -733,23 +793,11 @@ def register_callbacks(app):
 
         return body_rows
 
-    # Update risk matrix scatter when Location (or Metric just to re-trigger) changes
+    # Update risk matrix scatter when Location changes
     @app.callback(
         Output("tbl-risk-scatter", "figure"),
         Input("tbl-location-dd", "value"),
-        Input("tbl-metric-dd", "value"),  # not used in logic, but keeps chart in sync
+        Input("tbl-metric-dd", "value"),  # not used, but keeps chart in sync
     )
     def _update_risk_scatter(selected_locations, metric_key):
         return _risk_matrix_figure(selected_locations)
-
-    # Toggle help popover
-    @app.callback(
-        Output("tbl-help-popover", "is_open"),
-        Input("tbl-help-btn", "n_clicks"),
-        State("tbl-help-popover", "is_open"),
-        prevent_initial_call=False,
-    )
-    def _toggle_help(n_clicks, is_open):
-        if n_clicks:
-            return not is_open
-        return is_open

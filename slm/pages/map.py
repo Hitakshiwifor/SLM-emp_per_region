@@ -3,6 +3,7 @@
 from functools import lru_cache
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 
 from dash import html, dcc, Input, Output
 import dash_bootstrap_components as dbc
@@ -15,14 +16,10 @@ from ..config import MAPBOX_TOKEN
 
 # ========= 1. DATA & BASIC CONSTANTS ========================================
 
-# main.supply_per_region – already wired to qa.duckdb via load_df()
 df = load_df()
-
-# GeoJSON shapes (backed by shapes.NUTS_RG_60M_2024_4326 / GEO_PATHS in your config)
 GEO_ALL = load_geo()
 
-# We only have/need NUTS2 in this file (region_level = 4)
-REGION_LEVEL_FIXED = 4
+REGION_LEVEL_FIXED = 4  # NUTS2 only
 
 # ---- helper: safe unique sorted ----
 def _uniq_sorted(series):
@@ -33,6 +30,27 @@ def _uniq_sorted(series):
         s = sorted(map(str, s))
     return s
 
+# metric columns (emp / une / supply)
+EMP_COL = None
+for c in ["emp", "employment", "EMP"]:
+    if c in df.columns:
+        EMP_COL = c
+        break
+
+UNE_COL = None
+for c in ["une", "unemployment", "UNE"]:
+    if c in df.columns:
+        UNE_COL = c
+        break
+
+SUP_COL = None
+for c in ["supply", "labour_supply", "SUP"]:
+    if c in df.columns:
+        SUP_COL = c
+        break
+
+if EMP_COL is None:
+    raise ValueError("Dataset needs an employment column (emp / employment / EMP).")
 
 # ---- filter values from main.supply_per_region -----------------------------
 YEARS_ALL = _uniq_sorted(df["year"])
@@ -86,6 +104,60 @@ def _code_to_name_nuts2() -> dict:
 
 
 @lru_cache(maxsize=1)
+def _code_to_cntr_nuts2() -> dict:
+    """region_code -> 2-letter country code."""
+    geo = _geo_for_level(REGION_LEVEL_FIXED)
+    out = {}
+    for ft in geo.get("features", []):
+        props = ft.get("properties", {})
+        code = norm_code(
+            props.get("NUTS_ID")
+            or props.get("nuts_id")
+            or props.get("ID")
+            or props.get("id")
+        )
+        if not code:
+            continue
+        cntr = props.get("CNTR_CODE") or ""
+        out[code] = str(cntr)
+    return out
+
+
+@lru_cache(maxsize=1)
+def _code_to_centroid_nuts2() -> dict:
+    """Approx centroid of each polygon (for hotspot dot placement)."""
+    geo = _geo_for_level(REGION_LEVEL_FIXED)
+    out = {}
+    for ft in geo.get("features", []):
+        props = ft.get("properties", {})
+        code = norm_code(
+            props.get("NUTS_ID")
+            or props.get("nuts_id")
+            or props.get("ID")
+            or props.get("id")
+        )
+        geom = ft.get("geometry") or {}
+        coords_all = []
+
+        if geom.get("type") == "Polygon":
+            for ring in geom.get("coordinates", []):
+                coords_all.extend(ring)
+        elif geom.get("type") == "MultiPolygon":
+            for poly in geom.get("coordinates", []):
+                for ring in poly:
+                    coords_all.extend(ring)
+
+        if not coords_all or not code:
+            continue
+
+        xs, ys = zip(*coords_all)
+        lon = float(sum(xs) / len(xs))
+        lat = float(sum(ys) / len(ys))
+        out[code] = [lon, lat]
+    return out
+
+
+@lru_cache(maxsize=1)
 def _location_options():
     """
     Dropdown options for Location: label = NAME_LATN, value = region_code.
@@ -97,11 +169,10 @@ def _location_options():
         c_norm = norm_code(code)
         label = names.get(c_norm, c_norm)
         opts.append({"label": label, "value": code})
-    # Sort by label for a nice UX
     return sorted(opts, key=lambda x: x["label"])
 
 
-# ========= 3. METRICS AGGREGATION (EMP / UNE / SUPPLY) ======================
+# ========= 3. FILTERED BASE & METRIC AGGREGATION ============================
 
 def _ensure_levels(sub: pd.DataFrame) -> pd.DataFrame:
     """
@@ -115,6 +186,33 @@ def _ensure_levels(sub: pd.DataFrame) -> pd.DataFrame:
     return sub
 
 
+def _filtered_base(year, sex_code, age_code, locations):
+    """
+    Common filtered subset used for:
+      - summary cards,
+      - age donut,
+      - hotspot points.
+    """
+    sub = df.copy()
+    sub = sub[sub["region_level"].astype(int) == REGION_LEVEL_FIXED]
+    sub = sub[sub["year"].astype(int) == int(year)]
+
+    if sex_code is not None:
+        sub = sub[sub["sex_code"].astype(str) == str(sex_code)]
+
+    if age_code not in (None, "ALL"):
+        sub = sub[sub["age_code"].astype(str) == str(age_code)]
+
+    sub = _ensure_levels(sub)
+
+    if locations:
+        if isinstance(locations, str):
+            locations = [locations]
+        sub = sub[sub["region_code"].astype(str).isin(locations)]
+
+    return sub
+
+
 @lru_cache(maxsize=512)
 def _metrics_by_region(
     year: int,
@@ -124,38 +222,17 @@ def _metrics_by_region(
 ):
     """
     Return a dict: {region_code_norm: {'emp':.., 'une':.., 'supply':..}}.
-
-    - Filters to region_level = 4 (NUTS2).
-    - Filters by year, sex_code, age_code.
-    - Optional filter by subset of region codes (Location dropdown).
     """
-    # Decode locations (string key for cache)
     if locations_key == "ALL":
         selected_locs = None
     else:
         selected_locs = locations_key.split("|")
 
-    sub = df.copy()
-
-    # Fix level at NUTS2
-    sub = sub[sub["region_level"].astype(int) == REGION_LEVEL_FIXED]
-
-    # Filters
-    sub = sub[sub["year"].astype(int) == int(year)]
-    if sex_code is not None:
-        sub = sub[sub["sex_code"].astype(str) == str(sex_code)]
-    if age_code is not None:
-        sub = sub[sub["age_code"].astype(str) == str(age_code)]
-
-    sub = _ensure_levels(sub)
-
-    if selected_locs:
-        sub = sub[sub["region_code"].astype(str).isin(selected_locs)]
+    sub = _filtered_base(year, sex_code, age_code, selected_locs)
 
     if sub.empty:
         return {}
 
-    # Aggregate metrics at region_code level
     metrics_cols = [c for c in ["emp", "une", "supply"] if c in sub.columns]
     agg = (
         sub.groupby("region_code", as_index=False)[metrics_cols]
@@ -170,24 +247,253 @@ def _metrics_by_region(
     return result
 
 
-# ========= 4. COLORING & TOOLTIP ENRICHMENT =================================
+def _summary_totals(sub: pd.DataFrame):
+    """
+    Aggregate to overall employment / unemployment / supply totals.
+    """
+    def _safe(col):
+        if col and col in sub.columns:
+            return float(sub[col].fillna(0).sum())
+        return None
+
+    emp = _safe(EMP_COL)
+    une = _safe(UNE_COL)
+    sup = _safe(SUP_COL)
+    return emp, une, sup
+
+
+# ========= 4. AGE STRUCTURE DONUT (ACTIVE 25–65 & YOUTH 15–24) ==============
+
+def _age_bucket(code: str):
+    """Classify an age_code into 'active', 'youth', or None."""
+    c = str(code)
+    if "15-24" in c:
+        return "youth"
+    if any(
+        k in c
+        for k in [
+            "25-64",
+            "25-65",
+            "25-34",
+            "35-44",
+            "45-54",
+            "55-64",
+            "25-29",
+            "30-34",
+            "35-39",
+            "40-44",
+            "45-49",
+            "50-54",
+            "55-59",
+            "60-64",
+        ]
+    ):
+        return "active"
+    return None
+
+
+def _empty_age_donut():
+    fig = go.Figure()
+    fig.update_layout(
+        height=170,
+        margin=dict(l=0, r=0, t=0, b=0),
+        showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        annotations=[
+            dict(
+                text="No age data",
+                x=0.5,
+                y=0.5,
+                showarrow=False,
+                font=dict(size=11, color="#6c757d"),
+            )
+        ],
+    )
+    return fig
+
+
+def _blue_shades(n: int):
+    """Generate n shades around base #003662 for active age bands."""
+    base = np.array([0, 54, 98], dtype=float)
+    shades = []
+    for i in range(n):
+        factor = 0.4 + 0.6 * (i / max(n - 1, 1))  # in [0.4, 1.0]
+        col = base * factor + 255 * (1 - factor) * 0.1
+        col = np.clip(col, 0, 255).astype(int)
+        shades.append(f"rgb({col[0]},{col[1]},{col[2]})")
+    return shades
+
+
+def _age_structure_donut(sub: pd.DataFrame):
+    """
+    Single donut:
+      - each slice = one age band,
+      - youth 15–24 = teal,
+      - active 25–65 bands use different shades of #003662.
+    """
+    if EMP_COL not in sub.columns or "age_code" not in sub.columns:
+        return _empty_age_donut(), 0.0, 0.0
+
+    tmp = sub[["age_code", EMP_COL]].copy()
+    tmp = tmp.dropna(subset=["age_code"])
+    tmp["age_code"] = tmp["age_code"].astype(str)
+    tmp["bucket"] = tmp["age_code"].apply(_age_bucket)
+    tmp = tmp[tmp["bucket"].isin(["active", "youth"])]
+
+    if tmp.empty:
+        return _empty_age_donut(), 0.0, 0.0
+
+    grp = (
+        tmp.groupby(["age_code", "bucket"], as_index=False)[EMP_COL]
+        .sum()
+        .sort_values(["bucket", "age_code"])
+    )
+
+    labels = grp["age_code"].tolist()
+    values = grp[EMP_COL].astype(float).tolist()
+
+    buckets = grp["bucket"].tolist()
+    active_indices = [i for i, b in enumerate(buckets) if b == "active"]
+    youth_indices = [i for i, b in enumerate(buckets) if b == "youth"]
+
+    colors = ["#003662"] * len(labels)
+    for i in youth_indices:
+        colors[i] = "#72b7b2"
+    active_shades = _blue_shades(len(active_indices))
+    for idx, i in enumerate(active_indices):
+        colors[i] = active_shades[idx]
+
+    active_total = float(grp.loc[grp["bucket"] == "active", EMP_COL].sum())
+    youth_total = float(grp.loc[grp["bucket"] == "youth", EMP_COL].sum())
+
+    fig = go.Figure(
+        go.Pie(
+            labels=labels,
+            values=values,
+            hole=0.65,
+            sort=False,
+            direction="clockwise",
+            marker=dict(colors=colors, line=dict(width=0)),
+            textinfo="label+percent",
+        )
+    )
+    fig.update_layout(
+        height=170,
+        margin=dict(l=0, r=0, t=0, b=0),
+        showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig, active_total, youth_total
+
+
+# ========= 5. HOTSPOT POINTS (TOP 3 REGIONS PER COUNTRY) ====================
+
+COLOR_EMP = [0, 54, 98, 220]    # deep blue
+COLOR_UNE = [228, 87, 86, 220]  # red
+COLOR_SUP = [245, 133, 24, 220] # orange
+
+
+def _hotspot_points(sub: pd.DataFrame, top_per_country: int = 3):
+    """
+    For each country in the filtered data, pick the TOP `top_per_country` NUTS2
+    regions based on score = supply + unemployment.
+    """
+    if sub.empty:
+        return []
+
+    cols = [c for c in [EMP_COL, UNE_COL, SUP_COL] if c and c in sub.columns]
+    if not cols:
+        return []
+
+    agg = sub[["region_code"] + cols].groupby("region_code", as_index=False).sum()
+
+    score = np.zeros(len(agg), dtype=float)
+    if SUP_COL and SUP_COL in agg.columns:
+        score = score + agg[SUP_COL].fillna(0.0).to_numpy(float)
+    if UNE_COL and UNE_COL in agg.columns:
+        score = score + agg[UNE_COL].fillna(0.0).to_numpy(float)
+    agg["score"] = score
+
+    code2cntr = _code_to_cntr_nuts2()
+    code2name = _code_to_name_nuts2()
+    code2centroid = _code_to_centroid_nuts2()
+
+    agg["country"] = agg["region_code"].astype(str).map(
+        lambda c: code2cntr.get(norm_code(c), "")
+    )
+    agg["region_name"] = agg["region_code"].astype(str).map(
+        lambda c: code2name.get(norm_code(c), c)
+    )
+
+    max_score = float(agg["score"].max()) if np.isfinite(agg["score"].max()) else 1.0
+    if max_score <= 0:
+        max_score = 1.0
+
+    points = []
+
+    for cntr in sorted(agg["country"].dropna().unique()):
+        g = agg[agg["country"] == cntr].sort_values("score", ascending=False).head(top_per_country)
+        if g.empty:
+            continue
+
+        for _, row in g.iterrows():
+            code = str(row["region_code"])
+            c_norm = norm_code(code)
+            pos = code2centroid.get(c_norm)
+            if not pos:
+                continue
+
+            emp_val = float(row.get(EMP_COL, 0.0)) if EMP_COL in row.index else 0.0
+            une_val = float(row.get(UNE_COL, 0.0)) if UNE_COL in row.index else 0.0
+            sup_val = float(row.get(SUP_COL, 0.0)) if SUP_COL in row.index else 0.0
+
+            vals = {"emp": emp_val, "une": une_val, "sup": sup_val}
+            dom = max(vals, key=lambda k: vals[k])
+
+            if dom == "emp":
+                color = COLOR_EMP
+                dom_label = "Employment hotspot"
+            elif dom == "une":
+                color = COLOR_UNE
+                dom_label = "Unemployment hotspot"
+            else:
+                color = COLOR_SUP
+                dom_label = "Supply hotspot"
+
+            radius = 5000.0 + 18000.0 * (float(row["score"]) / max_score)
+
+            points.append(
+                dict(
+                    position=pos,
+                    color=color,
+                    radius=float(radius),
+                    region_code=c_norm,
+                    region_name=str(row["region_name"]),
+                    country=str(row["country"]),
+                    dominant_label=dom_label,
+                    emp_val=emp_val,
+                    une_val=une_val,
+                    sup_val=sup_val,
+                )
+            )
+
+    return points
+
+
+# ========= 6. COLORING & TOOLTIP ENRICHMENT FOR POLYGONS ====================
 
 def _enrich_geo_with_metrics(
     geo: dict,
     metrics_map: dict,
     color_field: str = "supply",
 ) -> dict:
-    """
-    Attach fillColor and tooltip fields to each feature.
-
-    - Color is based on the chosen metric (default: supply).
-    - Tooltip shows region name and all available metrics (emp, une, supply).
-    """
-    g = dict(geo)  # shallow copy
+    """Attach fillColor and tooltip fields to each feature."""
+    g = dict(geo)
     features = g.get("features", [])
     names = _code_to_name_nuts2()
 
-    # Palette (light → dark blue)
     palette = [
         [239, 243, 255],
         [198, 219, 239],
@@ -199,7 +505,6 @@ def _enrich_geo_with_metrics(
     ]
     num_classes = len(palette)
 
-    # Collect values for chosen color metric
     vals = []
     for v_dict in metrics_map.values():
         v = v_dict.get(color_field)
@@ -209,17 +514,15 @@ def _enrich_geo_with_metrics(
 
     if len(vals) >= 2:
         bins = np.quantile(vals, np.linspace(0, 1, num_classes + 1)).astype(float)
-        # Ensure strictly increasing
         for i in range(1, len(bins)):
             if bins[i] <= bins[i - 1]:
                 bins[i] = bins[i - 1] + 1e-9
     else:
-        # Fallback dummy bins
         bins = np.array([0, 1, 2, 3, 4, 5, 6, 7], dtype=float)
 
     def _rgba_for(v):
         if v is None or pd.isna(v):
-            return [230, 230, 230, 190]  # light grey for missing
+            return [230, 230, 230, 190]
         idx = np.searchsorted(bins, float(v), side="right") - 1
         idx = max(0, min(idx, num_classes - 1))
         r, g_, b = palette[idx]
@@ -240,7 +543,6 @@ def _enrich_geo_with_metrics(
         une_val = metrics.get("une")
         sup_val = metrics.get("supply")
 
-        # Nice formatted strings
         def fmt(v):
             return "N/A" if v is None or pd.isna(v) else f"{v:,.0f}"
 
@@ -255,7 +557,7 @@ def _enrich_geo_with_metrics(
     return g
 
 
-# ========= 5. DECK.GL SPEC ==================================================
+# ========= 7. DECK.GL SPEC (CHOROPLETH + HOTSPOT DOTS) ======================
 
 def _initial_view_state():
     return dict(
@@ -269,8 +571,8 @@ def _initial_view_state():
     )
 
 
-def _deck_spec(geojson_enriched: dict):
-    layer = {
+def _deck_spec(geojson_enriched: dict, points: list):
+    geo_layer = {
         "@@type": "GeoJsonLayer",
         "id": "nuts-layer",
         "data": geojson_enriched,
@@ -283,18 +585,35 @@ def _deck_spec(geojson_enriched: dict):
         "getLineColor": [160, 160, 160],
         "lineWidthMinPixels": 0.75,
     }
+    hotspot_layer = {
+        "@@type": "ScatterplotLayer",
+        "id": "hotspot-layer",
+        "data": points,
+        "pickable": True,
+        "radiusUnits": "meters",
+        "getPosition": "@@=position",
+        "getRadius": "@@=radius",
+        "getFillColor": "@@=color",
+        "getLineColor": [255, 255, 255],
+        "lineWidthMinPixels": 1,
+        "opacity": 0.9,
+    }
+    layers = [geo_layer]
+    if points:
+        layers.append(hotspot_layer)
+
     return {
         "initialViewState": _initial_view_state(),
-        "layers": [layer],
+        "layers": layers,
         "controller": True,
         "mapStyle": "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
     }
 
 
-# ========= 6. UI LAYOUT (same look & feel) ==================================
+# ========= 8. UI LAYOUT (FILTERS + CARDS + MAP) =============================
 
 def _filter_bar():
-    DD_STYLE = {"zIndex": 2000}  # keep dropdown menus above cards
+    DD_STYLE = {"zIndex": 2000}
     sex_options = [
         {
             "label": "Female (F)" if s == "F" else "Male (M)" if s == "M" else s,
@@ -312,9 +631,7 @@ def _filter_bar():
                             dbc.Label("Year", className="text-muted small"),
                             dcc.Dropdown(
                                 id="map-year-dd",
-                                options=[
-                                    {"label": str(y), "value": int(y)} for y in YEARS_ALL
-                                ],
+                                options=[{"label": str(y), "value": int(y)} for y in YEARS_ALL],
                                 value=DEFAULT_YEAR,
                                 clearable=False,
                                 style=DD_STYLE,
@@ -340,9 +657,7 @@ def _filter_bar():
                             dbc.Label("Age Groups", className="text-muted small"),
                             dcc.Dropdown(
                                 id="map-agecode-dd",
-                                options=[
-                                    {"label": a, "value": a} for a in AGE_CODES_ALL
-                                ],
+                                options=[{"label": a, "value": a} for a in AGE_CODES_ALL],
                                 value=AGE_CODES_ALL[0] if AGE_CODES_ALL else None,
                                 clearable=False,
                                 style=DD_STYLE,
@@ -356,7 +671,7 @@ def _filter_bar():
                             dcc.Dropdown(
                                 id="map-location-dd",
                                 options=_location_options(),
-                                value=None,  # None = "All regions"
+                                value=None,
                                 multi=True,
                                 placeholder="All regions",
                                 clearable=True,
@@ -378,6 +693,167 @@ def _filter_bar():
     )
 
 
+def _metric_pill(icon_class, title, value_id, bg_color):
+    return dbc.Card(
+        dbc.CardBody(
+            html.Div(
+                [
+                    html.Div(
+                        html.I(className=f"bi {icon_class}", style={"color": "#ffffff", "fontSize": "16px"}),
+                        style={
+                            "width": "36px",
+                            "height": "36px",
+                            "borderRadius": "12px",
+                            "display": "flex",
+                            "alignItems": "center",
+                            "justifyContent": "center",
+                            "marginRight": "8px",
+                            "background": bg_color,
+                        },
+                    ),
+                    html.Div(
+                        [
+                            html.Div(title, className="text-muted small"),
+                            html.Div(
+                                "—",
+                                id=value_id,
+                                style={"fontWeight": 600, "fontSize": "16px"},
+                            ),
+                        ]
+                    ),
+                ],
+                className="d-flex align-items-center",
+            )
+        ),
+        style={
+            "borderRadius": "16px",
+            "border": "none",
+            "boxShadow": "0 2px 10px rgba(0,0,0,.04)",
+            "backgroundColor": "#ffffff",
+        },
+        className="mb-2",
+    )
+
+
+def _summary_column():
+    return html.Div(
+        [
+            _metric_pill("bi-people-fill", "Total employment", "map-emp-total",
+                         "linear-gradient(135deg,#4e79a7,#003662)"),
+            _metric_pill("bi-graph-up", "Total supply", "map-supply-total",
+                         "linear-gradient(135deg,#f6b26b,#f58518)"),
+            _metric_pill("bi-exclamation-triangle-fill", "Total unemployment",
+                         "map-une-total",
+                         "linear-gradient(135deg,#ff8c8c,#e45756)"),
+        ]
+    )
+
+
+def _age_donut_card():
+    return dbc.Card(
+        dbc.CardBody(
+            [
+                html.Div("Age structure", className="text-muted small mb-1"),
+                dcc.Graph(
+                    id="map-age-donut",
+                    figure=_empty_age_donut(),
+                    config={"displayModeBar": False},
+                    style={"height": "170px"},
+                ),
+                html.Div(
+                    [
+                        html.Span("Active 25–65: ", className="text-muted small me-1"),
+                        html.Span("—", id="map-active-count", className="fw-semibold me-3"),
+                        html.Span("Age 15–24: ", className="text-muted small me-1"),
+                        html.Span("—", id="map-youth-count", className="fw-semibold"),
+                    ],
+                    className="mt-1",
+                ),
+            ]
+        ),
+        style={
+            "borderRadius": "16px",
+            "border": "none",
+            "boxShadow": "0 2px 10px rgba(0,0,0,.04)",
+            "backgroundColor": "#ffffff",
+        },
+    )
+
+
+def _empty_hotspot_donut():
+    fig = go.Figure()
+    fig.update_layout(
+        height=170,
+        margin=dict(l=0, r=0, t=0, b=0),
+        showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        annotations=[
+            dict(
+                text="Hover a hotspot",
+                x=0.5,
+                y=0.5,
+                showarrow=False,
+                font=dict(size=11, color="#6c757d"),
+            )
+        ],
+    )
+    return fig
+
+
+def _hotspot_donut_figure(emp_val, une_val):
+    total = emp_val + une_val
+    if total <= 0:
+        return _empty_hotspot_donut()
+
+    fig = go.Figure(
+        go.Pie(
+            labels=["Employment", "Unemployment"],
+            values=[emp_val, une_val],
+            hole=0.6,
+            sort=False,
+            direction="clockwise",
+            marker=dict(colors=["#003662", "#e45756"], line=dict(width=0)),
+            textinfo="label+percent",
+        )
+    )
+    fig.update_layout(
+        height=170,
+        margin=dict(l=0, r=0, t=0, b=0),
+        showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+
+def _region_donut_card():
+    return dbc.Card(
+        dbc.CardBody(
+            [
+                html.Div("Hotspot breakdown", className="text-muted small mb-1"),
+                dcc.Graph(
+                    id="map-hotspot-donut",
+                    figure=_empty_hotspot_donut(),
+                    config={"displayModeBar": False},
+                    style={"height": "170px"},
+                ),
+                html.Div(
+                    "Hover a hotspot region",
+                    id="map-hotspot-donut-title",
+                    className="fw-semibold small mt-1",
+                ),
+            ]
+        ),
+        style={
+            "borderRadius": "16px",
+            "border": "none",
+            "boxShadow": "0 2px 10px rgba(0,0,0,.04)",
+            "backgroundColor": "#ffffff",
+        },
+    )
+
+
 def _map_card():
     return dbc.Card(
         dbc.CardBody(
@@ -385,7 +861,7 @@ def _map_card():
                 id="deck-wrap",
                 className="map-frame",
                 style={
-                    "height": "70vh",
+                    "height": "68vh",
                     "borderRadius": "16px",
                     "overflow": "hidden",
                     "border": "1px solid #e6e9ef",
@@ -404,37 +880,100 @@ def _map_card():
 def layout():
     return [
         _filter_bar(),
-        _map_card(),
-        html.Div(style={"height": "12px"}),
+        dbc.Row(
+            [
+                dbc.Col(
+                    [
+                        _summary_column(),
+                        html.Div(style={"height": "8px"}),
+                        dbc.Row(
+                            [
+                                dbc.Col(_age_donut_card(), md=6, xs=12),
+                                dbc.Col(_region_donut_card(), md=6, xs=12),
+                            ],
+                            className="g-2",
+                        ),
+                    ],
+                    lg=4,
+                    md=5,
+                    className="mb-3",
+                ),
+                dbc.Col(
+                    _map_card(),
+                    lg=8,
+                    md=7,
+                    className="mb-3",
+                ),
+            ],
+            className="g-3",
+        ),
+        html.Div(style={"height": "8px"}),
     ]
 
 
-# ========= 7. CALLBACKS =====================================================
+# ========= 9. CALLBACKS =====================================================
 
 def register_callbacks(app):
     @app.callback(
         Output("deck-wrap", "children"),
+        Output("map-emp-total", "children"),
+        Output("map-supply-total", "children"),
+        Output("map-une-total", "children"),
+        Output("map-age-donut", "figure"),
+        Output("map-active-count", "children"),
+        Output("map-youth-count", "children"),
         Input("map-year-dd", "value"),
         Input("map-sex-dd", "value"),
         Input("map-agecode-dd", "value"),
         Input("map-location-dd", "value"),
     )
     def update_map(year, sex_code, age_code, locations):
-        # Safeguards
         if year is None:
-            return html.Div("No year selected.", className="text-danger")
+            return (
+                html.Div("No year selected.", className="text-danger"),
+                "—",
+                "—",
+                "—",
+                _empty_age_donut(),
+                "—",
+                "—",
+            )
 
         geo_for_level = _geo_for_level(REGION_LEVEL_FIXED)
         if not geo_for_level.get("features"):
-            return html.Div("No GeoJSON for NUTS2 regions.", className="text-danger")
+            return (
+                html.Div("No GeoJSON for NUTS2 regions.", className="text-danger"),
+                "—",
+                "—",
+                "—",
+                _empty_age_donut(),
+                "—",
+                "—",
+            )
 
-        # Encode locations as a cacheable key
         if not locations:
             locations_key = "ALL"
         else:
             if isinstance(locations, str):
                 locations = [locations]
             locations_key = "|".join(sorted(map(str, locations)))
+
+        base = _filtered_base(year, sex_code, age_code, locations)
+
+        emp_tot, une_tot, sup_tot = _summary_totals(base)
+
+        def fmt(v):
+            return "—" if v is None else f"{v:,.0f}"
+
+        emp_txt = fmt(emp_tot)
+        une_txt = fmt(une_tot)
+        sup_txt = fmt(sup_tot)
+
+        # Age donut: ignore age filter to show full 15–65 structure
+        pie_base = _filtered_base(year, sex_code, None, locations)
+        age_fig, active_total, youth_total = _age_structure_donut(pie_base)
+        active_txt = f"{active_total:,.0f}"
+        youth_txt = f"{youth_total:,.0f}"
 
         metrics_map = _metrics_by_region(
             int(year),
@@ -443,15 +982,17 @@ def register_callbacks(app):
             locations_key,
         )
 
-        # Enrich shapes with metrics – color by "supply" (from supply_per_region)
         gj = _enrich_geo_with_metrics(geo_for_level, metrics_map, color_field="supply")
-        spec = _deck_spec(gj)
 
-        # Deck.gl component with a compact, informative tooltip
-        return dash_deck.DeckGL(
+        points = _hotspot_points(base, top_per_country=3)
+
+        spec = _deck_spec(gj, points)
+
+        deck_component = dash_deck.DeckGL(
             spec,
             id="deck-gl",
             mapboxKey=MAPBOX_TOKEN,
+            enableEvents=["hover"],
             tooltip={
                 "html": (
                     "<b>{region_name}</b>"
@@ -469,3 +1010,38 @@ def register_callbacks(app):
             },
             style={"width": "100%", "height": "100%"},
         )
+
+        return (
+            deck_component,
+            emp_txt,
+            sup_txt,
+            une_txt,
+            age_fig,
+            active_txt,
+            youth_txt,
+        )
+
+    @app.callback(
+        Output("map-hotspot-donut", "figure"),
+        Output("map-hotspot-donut-title", "children"),
+        Input("deck-gl", "hoverInfo"),
+        prevent_initial_call=False,
+    )
+    def _update_hotspot_donut(hover_info):
+        if not hover_info or not hover_info.get("object"):
+            return _empty_hotspot_donut(), "Hover a hotspot region"
+
+        obj = hover_info["object"]
+
+        # Only react to hotspot points (they carry emp_val / une_val)
+        if "emp_val" not in obj or "une_val" not in obj:
+            return _empty_hotspot_donut(), "Hover a hotspot region"
+
+        region_name = obj.get("region_name", "")
+        country = obj.get("country", "")
+        emp_val = float(obj.get("emp_val", 0.0))
+        une_val = float(obj.get("une_val", 0.0))
+
+        title = f"{region_name} ({country})"
+        fig = _hotspot_donut_figure(emp_val, une_val)
+        return fig, title

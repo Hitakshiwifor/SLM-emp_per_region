@@ -1,4 +1,3 @@
-# app.py
 from dash import Dash, dcc, html, Input, Output
 import dash_bootstrap_components as dbc
 from .config import APP_TITLE, THEME, PORT
@@ -36,8 +35,8 @@ app.index_string = """
 
 NAV_ITEMS = [
     (" Introduction", "bi-house-door", "/"),
-    (" Workflow composition", "bi-diagram-3", "/sankey"),
-    (" Regional Trends", "bi-table", "/tables"),
+    (" Sankey", "bi-diagram-3", "/sankey"),
+    (" Tables", "bi-table", "/tables"),
     (" Map", "bi-geo-alt", "/map"),
 ]
 
@@ -94,12 +93,10 @@ def header(pathname="/"):
         className="glass",
         style={
             "position": "sticky",
-            "top": "40px",          
-            "zIndex": "60",
+            "top": "8px",
+            "zIndex": "30",
             "borderRadius": "16px",
             "marginBottom": "10px",
-            "marginLeft": "12px",   
-            "marginRight": "12px",
         },
     )
 
@@ -129,10 +126,9 @@ def route(pathname):
     if pathname == "/tables":
         return hdr, tables.layout()
     if pathname == "/map":
-        return hdr, dbc.Container(map_page.layout(), fluid=True)  
-    return (
-        hdr,
-        dbc.Container(html.H4("404 — Page not found", className="mt-4"), fluid=True),
+        return hdr, dbc.Container(map_page.layout(), fluid=True)
+    return hdr, dbc.Container(
+        html.H4("404 — Page not found", className="mt-4"), fluid=True
     )
 
 
@@ -140,7 +136,6 @@ def route(pathname):
 map_page.register_callbacks(app)
 sankey.register_callbacks(app)
 tables.register_callbacks(app)
-
 
 # ---------- Run server ----------
 if __name__ == "__main__":

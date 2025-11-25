@@ -3,9 +3,9 @@ import dash_bootstrap_components as dbc
 from ..config import APP_TITLE
 
 NAV_ITEMS = [
-    (" Introduction", "bi-house-door", "/"),
-    (" Sankey", "bi-diagram-3", "/sankey"),
-    (" Tables", "bi-table", "/tables"),
+    (" Overview", "bi-house-door", "/"),
+    (" Workforce Composition", "bi-diagram-3", "/sankey"),
+    (" Regional trends", "bi-table", "/tables"),
     (" Map", "bi-geo-alt", "/map"),
 ]
 
